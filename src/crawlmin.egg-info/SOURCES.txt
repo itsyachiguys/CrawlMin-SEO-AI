@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+src/crawlmin/__init__.py
+src/crawlmin/config.py
+src/crawlmin/crawler.py
+src/crawlmin/link_checker.py
+src/crawlmin/logging_config.py
+src/crawlmin/seo_rules.py
+src/crawlmin.egg-info/PKG-INFO
+src/crawlmin.egg-info/SOURCES.txt
+src/crawlmin.egg-info/dependency_links.txt
+src/crawlmin.egg-info/top_level.txt
+tests/test_crawl_site.py
+tests/test_link_checker.py
+tests/test_smoke.py
