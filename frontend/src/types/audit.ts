@@ -1,6 +1,15 @@
 
 export type Severity = "error" | "warning" | "notice";
 
+export type LinkStatus =
+    | "working"
+    | "broken"
+    | "unverified"
+    | "redirected"
+    | "rate_limited"
+    | "server_error"
+    | "invalid";
+
 export interface SEOIssue {
     id: string;
     ruleId: string;
@@ -18,6 +27,7 @@ export interface BrokenLink {
     destinationUrl: string;
     statusCode: number | null;
     linkType: "internal" | "external" | "unknown";
+    linkStatus: LinkStatus;
     message: string;
 }
 
@@ -28,6 +38,7 @@ export interface AuditMetrics {
     warnings: number;
     notices: number;
     brokenLinks: number;
+    unverifiedLinks: number;
 }
 
 export interface AuditResponse {

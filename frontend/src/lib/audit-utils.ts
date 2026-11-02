@@ -4,6 +4,7 @@ import type {
     BrokenLink,
     AuditMetrics,
     Severity,
+    LinkStatus,
 } from "@/types/audit";
 
 type Data = Record<string, any>;
@@ -25,27 +26,93 @@ function getPages (results: Data): Data[] {
         results.crawled_pages ??
         [];
 
-    if (Array.isArray(pages)) return pages;
-
-    return [];
+    return Array.isArray(pages) ? pages : [];
 }
 
 function getSeverity (value: any): Severity {
     const severity = String(value ?? "").toLowerCase();
 
-    if (
-        ["error", "critical", "high", "fatal"].includes(severity)
-    ) {
+    if (["error", "critical", "high", "fatal"].includes(severity)) {
         return "error";
     }
 
-    if (
-        ["warning", "medium"].includes(severity)
-    ) {
+    if (["warning", "medium"].includes(severity)) {
         return "warning";
     }
 
     return "notice";
+}
+
+function getLinkStatusCode (link: Data): number | null {
+    const value =
+        link.status_code ??
+        link.status ??
+        link.http_status ??
+        link.statusCode;
+
+    const number = Number(value);
+
+    return Number.isFinite(number) && value !== null && value !== ""
+        ? number
+        : null;
+}
+
+
+function getLinkClassification (link: Data): LinkStatus {
+    const explicitStatus = String(
+        link.link_status ?? ""
+    ).toLowerCase();
+
+    const validStatuses: LinkStatus[] = [
+        "working",
+        "broken",
+        "unverified",
+        "redirected",
+        "rate_limited",
+        "server_error",
+        "invalid",
+    ];
+
+    if (validStatuses.includes(explicitStatus as LinkStatus)) {
+        return explicitStatus as LinkStatus;
+    }
+
+    if (link.is_broken === true || link.broken === true) {
+        return "broken";
+    }
+
+    const status = getLinkStatusCode(link);
+
+    if (status !== null) {
+        if (status >= 200 && status < 300) return "working";
+        if (status >= 300 && status < 400) return "redirected";
+        if (status === 404 || status === 410) return "broken";
+        if (status === 429) return "rate_limited";
+        if (status >= 500) return "server_error";
+        if (status >= 400) return "unverified";
+    }
+
+    return "unverified";
+}
+
+
+function getLinkType (
+    sourceUrl: string,
+    destinationUrl: string
+): BrokenLink["linkType"] {
+    try {
+        const destination = new URL(destinationUrl, sourceUrl);
+
+        if (!sourceUrl) return "unknown";
+
+        const source = new URL(sourceUrl);
+
+        return source.hostname === destination.hostname
+            ? "internal"
+            : "external";
+    } catch {
+        return "unknown";
+    }
 }
 
 export function normalizeIssues (results: Data): SEOIssue[] {
@@ -66,11 +133,16 @@ export function normalizeIssues (results: Data): SEOIssue[] {
                     issue.rule_id ?? issue.ruleId ?? "SEO-UNKNOWN"
                 ),
                 title: String(
-                    issue.title ?? issue.rule_id ?? issue.message ?? "SEO issue"
+                    issue.title ??
+                    issue.rule_id ??
+                    issue.message ??
+                    "SEO issue"
                 ),
                 severity: getSeverity(issue.severity),
                 message: String(
-                    issue.message ?? issue.description ?? "No description available."
+                    issue.message ??
+                    issue.description ??
+                    "No description available."
                 ),
                 recommendation: String(
                     issue.recommendation ??
@@ -83,32 +155,44 @@ export function normalizeIssues (results: Data): SEOIssue[] {
         });
     });
 
-    // Also support engines that return a site-level issue list.
+    // Also support site-level SEO issue lists.
     const siteIssues = asArray(results.seo_issues);
 
     siteIssues.forEach((issue, index) => {
-        if (issues.some(
-            existing =>
-                existing.ruleId === String(issue.rule_id ?? "") &&
-                existing.pageUrl === String(issue.page_url ?? issue.url ?? "")
-        )) {
+        const ruleId = String(issue.rule_id ?? "SEO-UNKNOWN");
+        const pageUrl = String(issue.page_url ?? issue.url ?? "");
+
+        if (
+            issues.some(
+                existing =>
+                    existing.ruleId === ruleId &&
+                    existing.pageUrl === pageUrl
+            )
+        ) {
             return;
         }
 
         issues.push({
             id: `site-${index}`,
-            ruleId: String(issue.rule_id ?? "SEO-UNKNOWN"),
+            ruleId,
             title: String(
-                issue.title ?? issue.rule_id ?? issue.message ?? "SEO issue"
+                issue.title ??
+                issue.rule_id ??
+                issue.message ??
+                "SEO issue"
             ),
             severity: getSeverity(issue.severity),
             message: String(
-                issue.message ?? issue.description ?? "No description available."
+                issue.message ??
+                issue.description ??
+                "No description available."
             ),
             recommendation: String(
-                issue.recommendation ?? issue.suggestion ?? "Review this issue."
+                issue.recommendation ??
+                issue.suggestion ??
+                "Review this issue."
             ),
-            pageUrl: String(issue.page_url ?? issue.url ?? ""),
+            pageUrl,
             category: String(issue.category ?? "On-page SEO"),
         });
     });
@@ -116,161 +200,94 @@ export function normalizeIssues (results: Data): SEOIssue[] {
     return issues;
 }
 
-function getLinkStatus (link: Data): number | null {
-    const value =
-        link.status_code ??
-        link.status ??
-        link.http_status ??
-        link.statusCode;
-
-    const number = Number(value);
-
-    return Number.isFinite(number) && value !== null && value !== ""
-        ? number
-        : null;
-}
-
-
-function isBroken (link: Data): boolean {
-    // Trust the backend's explicit classification first.
-    if (typeof link.is_broken === "boolean") {
-        return link.is_broken;
-    }
-
-    if (typeof link.broken === "boolean") {
-        return link.broken;
-    }
-
-    // Use the backend's classification when available.
-    const linkStatus = String(
-        link.link_status ?? ""
-    ).toLowerCase();
-
-    if (linkStatus) {
-        return linkStatus === "broken";
-    }
-
-    // Conservative fallback for older audit responses.
-    const status = getLinkStatus(link);
-
-    return status === 404 || status === 410;
-}
-
-
+/**
+ * Returns all discovered links, not just broken links.
+ * The dashboard filters them into working, broken and unverified groups.
+ */
 export function normalizeBrokenLinks (results: Data): BrokenLink[] {
     const pages = getPages(results);
-    const brokenLinks: BrokenLink[] = [];
+    const normalizedLinks: BrokenLink[] = [];
+
+    function addLink (
+        linkValue: any,
+        sourceUrl: string,
+        id: string
+    ) {
+        const link = asObject(linkValue);
+
+        const destinationUrl = String(
+            link.url ??
+            link.href ??
+            link.destination_url ??
+            link.target_url ??
+            ""
+        );
+
+        if (!destinationUrl) return;
+
+        normalizedLinks.push({
+            id,
+            sourceUrl,
+            destinationUrl,
+            statusCode: getLinkStatusCode(link),
+            linkType: getLinkType(sourceUrl, destinationUrl),
+            linkStatus: getLinkClassification(link),
+            message: String(
+                link.message ??
+                link.error ??
+                "No additional verification details available."
+            ),
+        });
+    }
 
     pages.forEach((page, pageIndex) => {
-        const sourceUrl = String(page.url ?? page.page_url ?? "");
+        const sourceUrl = String(
+            page.url ?? page.page_url ?? ""
+        );
 
         const links = asArray(
             page.link_results ?? page.links
         );
 
         links.forEach((link, linkIndex) => {
-            if (!isBroken(asObject(link))) return;
-
-            const destinationUrl = String(
-                link.url ??
-                link.href ??
-                link.destination_url ??
-                link.target_url ??
-                ""
-            );
-
-            if (!destinationUrl) return;
-
-            let linkType: BrokenLink["linkType"] = "unknown";
-
-            try {
-                const source = new URL(sourceUrl);
-                const destination = new URL(destinationUrl, sourceUrl);
-
-                linkType =
-                    source.hostname === destination.hostname
-                        ? "internal"
-                        : "external";
-            } catch {
-                linkType = "unknown";
-            }
-
-            brokenLinks.push({
-                id: `${pageIndex}-${linkIndex}`,
+            addLink(
+                link,
                 sourceUrl,
-                destinationUrl,
-                statusCode: getLinkStatus(link),
-                linkType,
-                message: String(
-                    link.message ??
-                    link.error ??
-                    "The destination could not be reached successfully."
-                ),
-            });
+                `${pageIndex}-${linkIndex}`
+            );
         });
     });
 
-    // Support a site-level broken-link list as well.
+    // Support site-level link results too.
     const siteLinks = asArray(results.link_results);
 
     siteLinks.forEach((link, index) => {
         const item = asObject(link);
 
-        if (!isBroken(item)) return;
-
-        const destinationUrl = String(
-            item.url ??
-            item.href ??
-            item.destination_url ??
-            item.target_url ??
-            ""
-        );
-
-        if (!destinationUrl) return;
-
         const sourceUrl = String(
             item.source_url ?? item.source_page ?? ""
         );
 
-        if (brokenLinks.some(
-            existing =>
-                existing.sourceUrl === sourceUrl &&
-                existing.destinationUrl === destinationUrl
-        )) {
-            return;
-        }
-
-        let linkType: BrokenLink["linkType"] = "unknown";
-
-        try {
-            const source = new URL(sourceUrl);
-            const destination = new URL(destinationUrl, sourceUrl);
-
-            linkType =
-                source.hostname === destination.hostname
-                    ? "internal"
-                    : "external";
-        } catch {
-            linkType = "unknown";
-        }
-
-        brokenLinks.push({
-            id: `site-${index}`,
-            sourceUrl,
-            destinationUrl,
-            statusCode: getLinkStatus(item),
-            linkType,
-            message: String(item.message ?? item.error ?? "Broken link"),
-        });
+        addLink(item, sourceUrl, `site-${index}`);
     });
 
-    return brokenLinks;
+    // Avoid duplicate records returned at both page and site level.
+    return normalizedLinks.filter((link, index, array) => {
+        return (
+            array.findIndex(
+                item =>
+                    item.sourceUrl === link.sourceUrl &&
+                    item.destinationUrl === link.destinationUrl
+            ) === index
+        );
+    });
 }
 
 export function calculateMetrics (
     results: Data,
     issues: SEOIssue[],
-    links: BrokenLink[]
+    brokenLinks: BrokenLink[],
+    unverifiedLinks: BrokenLink[] = []
 ): AuditMetrics {
     const pages = getPages(results);
 
@@ -292,6 +309,7 @@ export function calculateMetrics (
         errors: count("error"),
         warnings: count("warning"),
         notices: count("notice"),
-        brokenLinks: links.length,
+        brokenLinks: brokenLinks.length,
+        unverifiedLinks: unverifiedLinks.length,
     };
 }

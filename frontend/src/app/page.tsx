@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 
 import {
   Activity,
@@ -11,16 +11,16 @@ import {
   CheckCircle2,
   ChevronRight,
   ExternalLink,
+  FileWarning,
   Globe,
   LayoutDashboard,
   Link2,
   LoaderCircle,
+  RefreshCw,
   Search,
   ShieldCheck,
   X,
   Zap,
-  FileWarning,
-  RefreshCw,
 } from "lucide-react";
 
 import {
@@ -32,6 +32,7 @@ import {
 import type {
   SEOIssue,
   BrokenLink,
+  LinkStatus,
 } from "@/types/audit";
 
 const API_URL =
@@ -46,7 +47,9 @@ type AuditResponse = {
 
 type Tab = "overview" | "issues" | "links";
 
-type Filter = "all" | "error" | "warning" | "notice";
+type IssueFilter = "all" | "error" | "warning" | "notice";
+
+type LinkFilter = "broken" | "unverified" | "working";
 
 export default function Home () {
   const [url, setUrl] = useState("https://example.com");
@@ -60,7 +63,10 @@ export default function Home () {
   const [audit, setAudit] = useState<AuditResponse | null>(null);
 
   const [activeTab, setActiveTab] = useState<Tab>("overview");
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<IssueFilter>("all");
+  const [linkFilter, setLinkFilter] =
+    useState<LinkFilter>("broken");
+
   const [search, setSearch] = useState("");
 
   const [selectedIssue, setSelectedIssue] =
@@ -71,7 +77,7 @@ export default function Home () {
 
   const [showRawData, setShowRawData] = useState(false);
 
-  async function runAudit (event: React.FormEvent<HTMLFormElement>) {
+  async function runAudit (event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     setLoading(true);
@@ -79,21 +85,25 @@ export default function Home () {
     setAudit(null);
     setSelectedIssue(null);
     setSelectedLink(null);
+    setSearch("");
 
     try {
-      const response = await fetch(`${API_URL}/api/v1/audits`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          url,
-          max_pages: maxPages,
-          check_links: checkLinks,
-          max_link_checks: maxLinkChecks,
-          single_page: singlePage,
-        }),
-      });
+      const response = await fetch(
+        `${API_URL}/api/v1/audits`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            url,
+            max_pages: maxPages,
+            check_links: checkLinks,
+            max_link_checks: maxLinkChecks,
+            single_page: singlePage,
+          }),
+        }
+      );
 
       const data = await response.json();
 
@@ -107,6 +117,7 @@ export default function Home () {
 
       setAudit(data);
       setActiveTab("overview");
+      setLinkFilter("broken");
     } catch (err) {
       setError(
         err instanceof Error
@@ -125,17 +136,41 @@ export default function Home () {
     [results]
   );
 
-  const brokenLinks = useMemo(
+  const allLinks = useMemo(
     () => normalizeBrokenLinks(results),
     [results]
   );
 
-  const metrics = useMemo(
-    () => calculateMetrics(results, issues, brokenLinks),
-    [results, issues, brokenLinks]
+  const brokenLinks = allLinks.filter(
+    link => link.linkStatus === "broken"
   );
 
-  const filteredIssues = issues.filter((issue) => {
+  const unverifiedLinks = allLinks.filter(
+    link =>
+      link.linkStatus === "unverified" ||
+      link.linkStatus === "rate_limited" ||
+      link.linkStatus === "server_error" ||
+      link.linkStatus === "invalid"
+  );
+
+  const workingLinks = allLinks.filter(
+    link =>
+      link.linkStatus === "working" ||
+      link.linkStatus === "redirected"
+  );
+
+  const metrics = useMemo(
+    () =>
+      calculateMetrics(
+        results,
+        issues,
+        brokenLinks,
+        unverifiedLinks
+      ),
+    [results, issues, brokenLinks, unverifiedLinks]
+  );
+
+  const filteredIssues = issues.filter(issue => {
     const matchesFilter =
       filter === "all" || issue.severity === filter;
 
@@ -151,15 +186,30 @@ export default function Home () {
     return matchesFilter && matchesSearch;
   });
 
-  const filteredLinks = brokenLinks.filter((link) => {
+  const filteredLinks = allLinks.filter(link => {
+    let matchesCategory = false;
+
+    if (linkFilter === "broken") {
+      matchesCategory = link.linkStatus === "broken";
+    } else if (linkFilter === "unverified") {
+      matchesCategory = unverifiedLinks.some(
+        item => item.id === link.id
+      );
+    } else {
+      matchesCategory = workingLinks.some(
+        item => item.id === link.id
+      );
+    }
+
     const query = search.toLowerCase();
 
-    return (
+    const matchesSearch =
       !query ||
       link.sourceUrl.toLowerCase().includes(query) ||
       link.destinationUrl.toLowerCase().includes(query) ||
-      link.message.toLowerCase().includes(query)
-    );
+      link.message.toLowerCase().includes(query);
+
+    return matchesCategory && matchesSearch;
   });
 
   const metricCards = [
@@ -199,6 +249,12 @@ export default function Home () {
       icon: Link2,
       color: "text-orange-400",
     },
+    {
+      label: "Unverified links",
+      value: metrics.unverifiedLinks,
+      icon: AlertTriangle,
+      color: "text-amber-400",
+    },
   ];
 
   function severityStyle (severity: string) {
@@ -212,22 +268,60 @@ export default function Home () {
     }
   }
 
+  function linkStatusStyle (status: LinkStatus) {
+    switch (status) {
+      case "broken":
+        return "bg-red-400/10 text-red-300";
+      case "working":
+      case "redirected":
+        return "bg-emerald-400/10 text-emerald-300";
+      default:
+        return "bg-amber-400/10 text-amber-300";
+    }
+  }
+
+  function linkStatusLabel (status: LinkStatus) {
+    return status.replace(/_/g, " ");
+  }
+
   function closeDetails () {
     setSelectedIssue(null);
     setSelectedLink(null);
   }
 
+  function changeTab (tab: Tab) {
+    setActiveTab(tab);
+    closeDetails();
+    setSearch("");
+    setFilter("all");
+  }
+
+  const linkTabs = [
+    {
+      id: "broken" as const,
+      label: "Broken",
+      count: brokenLinks.length,
+    },
+    {
+      id: "unverified" as const,
+      label: "Unverified",
+      count: unverifiedLinks.length,
+    },
+    {
+      id: "working" as const,
+      label: "Working",
+      count: workingLinks.length,
+    },
+  ];
+
   return (
     <main className="min-h-screen bg-[#090d18] text-white">
-
       <div className="flex min-h-screen">
 
         {/* SIDEBAR */}
 
         <aside className="hidden w-64 shrink-0 border-r border-white/10 bg-[#0c1220] p-6 lg:flex lg:flex-col">
-
           <div className="flex items-center gap-3">
-
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-400 text-lg font-bold text-slate-950">
               C
             </div>
@@ -240,20 +334,18 @@ export default function Home () {
                 SEO Intelligence
               </p>
             </div>
-
           </div>
 
           <div className="mt-12 space-y-2">
-
             <p className="mb-4 text-xs font-semibold uppercase tracking-widest text-slate-500">
               Workspace
             </p>
 
             <button
-              onClick={() => setActiveTab("overview")}
+              onClick={() => changeTab("overview")}
               className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-sm ${activeTab === "overview"
-                  ? "bg-cyan-400/10 text-cyan-300"
-                  : "text-slate-400 hover:bg-white/5"
+                ? "bg-cyan-400/10 text-cyan-300"
+                : "text-slate-400 hover:bg-white/5"
                 }`}
             >
               <LayoutDashboard size={18} />
@@ -261,14 +353,15 @@ export default function Home () {
             </button>
 
             <button
-              onClick={() => setActiveTab("issues")}
+              onClick={() => changeTab("issues")}
               className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-sm ${activeTab === "issues"
-                  ? "bg-cyan-400/10 text-cyan-300"
-                  : "text-slate-400 hover:bg-white/5"
+                ? "bg-cyan-400/10 text-cyan-300"
+                : "text-slate-400 hover:bg-white/5"
                 }`}
             >
               <ShieldCheck size={18} />
               SEO Issues
+
               {audit && (
                 <span className="ml-auto text-xs">
                   {issues.length}
@@ -277,25 +370,24 @@ export default function Home () {
             </button>
 
             <button
-              onClick={() => setActiveTab("links")}
+              onClick={() => changeTab("links")}
               className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-sm ${activeTab === "links"
-                  ? "bg-cyan-400/10 text-cyan-300"
-                  : "text-slate-400 hover:bg-white/5"
+                ? "bg-cyan-400/10 text-cyan-300"
+                : "text-slate-400 hover:bg-white/5"
                 }`}
             >
               <Link2 size={18} />
-              Broken Links
+              Link Intelligence
+
               {audit && (
                 <span className="ml-auto text-xs">
-                  {brokenLinks.length}
+                  {allLinks.length}
                 </span>
               )}
             </button>
-
           </div>
 
           <div className="mt-auto rounded-xl border border-white/10 bg-white/[0.03] p-4">
-
             <div className="flex items-center gap-2 text-sm font-medium">
               <Zap size={16} className="text-cyan-300" />
               CrawlMin Engine
@@ -309,17 +401,13 @@ export default function Home () {
               <span className="h-2 w-2 rounded-full bg-emerald-400" />
               Backend integration
             </div>
-
           </div>
-
         </aside>
 
         {/* MAIN CONTENT */}
 
         <section className="min-w-0 flex-1">
-
           <header className="flex min-h-20 items-center justify-between border-b border-white/10 px-6 md:px-10">
-
             <div>
               <p className="text-xs text-slate-500">
                 Workspace / {activeTab}
@@ -330,7 +418,7 @@ export default function Home () {
                   ? "SEO Dashboard"
                   : activeTab === "issues"
                     ? "SEO Issues"
-                    : "Broken Links Explorer"}
+                    : "Link Intelligence Explorer"}
               </h2>
             </div>
 
@@ -345,7 +433,6 @@ export default function Home () {
               <RefreshCw size={14} />
               Latest audit
             </button>
-
           </header>
 
           <div className="mx-auto max-w-7xl space-y-8 p-6 md:p-10">
@@ -353,7 +440,6 @@ export default function Home () {
             {/* INTRODUCTION */}
 
             <div>
-
               <p className="text-xs font-semibold tracking-widest text-cyan-300">
                 WEBSITE INTELLIGENCE
               </p>
@@ -363,7 +449,7 @@ export default function Home () {
                   ? "Understand your website."
                   : activeTab === "issues"
                     ? "Find what needs fixing."
-                    : "Discover broken destinations."}
+                    : "Understand every destination."}
               </h1>
 
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">
@@ -371,9 +457,8 @@ export default function Home () {
                   ? "Analyze your website, identify technical SEO problems and understand its overall health."
                   : activeTab === "issues"
                     ? "Inspect detected SEO issues, their severity, affected pages and recommended corrections."
-                    : "Investigate broken internal and external links, their source pages and HTTP responses."}
+                    : "Investigate broken, unverified and working links across your website."}
               </p>
-
             </div>
 
             {/* AUDIT FORM */}
@@ -382,7 +467,6 @@ export default function Home () {
               onSubmit={runAudit}
               className="rounded-2xl border border-white/10 bg-[#111a2b] p-5 md:p-7"
             >
-
               <div className="mb-5 flex items-center gap-2">
                 <Search size={19} className="text-cyan-300" />
                 <h3 className="font-semibold">
@@ -395,12 +479,11 @@ export default function Home () {
               </label>
 
               <div className="flex flex-col gap-3 md:flex-row">
-
                 <input
                   type="url"
                   required
                   value={url}
-                  onChange={(event) => setUrl(event.target.value)}
+                  onChange={event => setUrl(event.target.value)}
                   placeholder="https://yourwebsite.com"
                   className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#090f1d] px-4 py-3 text-sm outline-none focus:border-cyan-400"
                 />
@@ -422,11 +505,9 @@ export default function Home () {
                     </>
                   )}
                 </button>
-
               </div>
 
               <div className="mt-6 grid gap-5 md:grid-cols-2">
-
                 <div>
                   <label className="mb-2 block text-sm text-slate-400">
                     Maximum pages
@@ -438,7 +519,7 @@ export default function Home () {
                     max={100}
                     value={maxPages}
                     disabled={singlePage}
-                    onChange={(event) =>
+                    onChange={event =>
                       setMaxPages(Number(event.target.value))
                     }
                     className="w-full rounded-xl border border-white/10 bg-[#090f1d] px-4 py-3 text-sm outline-none focus:border-cyan-400 disabled:opacity-40"
@@ -456,44 +537,40 @@ export default function Home () {
                     max={500}
                     value={maxLinkChecks}
                     disabled={!checkLinks || singlePage}
-                    onChange={(event) =>
+                    onChange={event =>
                       setMaxLinkChecks(Number(event.target.value))
                     }
                     className="w-full rounded-xl border border-white/10 bg-[#090f1d] px-4 py-3 text-sm outline-none focus:border-cyan-400 disabled:opacity-40"
                   />
                 </div>
-
               </div>
 
               <div className="mt-5 flex flex-wrap gap-6">
-
                 <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-300">
                   <input
                     type="checkbox"
                     checked={checkLinks}
                     disabled={singlePage}
-                    onChange={(event) =>
+                    onChange={event =>
                       setCheckLinks(event.target.checked)
                     }
                     className="accent-cyan-400"
                   />
-                  Check broken links
+                  Check links
                 </label>
 
                 <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-300">
                   <input
                     type="checkbox"
                     checked={singlePage}
-                    onChange={(event) =>
+                    onChange={event =>
                       setSinglePage(event.target.checked)
                     }
                     className="accent-cyan-400"
                   />
                   Single-page audit
                 </label>
-
               </div>
-
             </form>
 
             {/* ERROR */}
@@ -513,13 +590,12 @@ export default function Home () {
               </div>
             )}
 
-            {/* METRICS */}
+            {/* AUDIT RESULTS */}
 
             {audit && (
               <div className="space-y-6">
 
                 <div className="flex flex-wrap items-center justify-between gap-3">
-
                   <div>
                     <h3 className="font-semibold">
                       Audit overview
@@ -533,12 +609,12 @@ export default function Home () {
                   <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-300">
                     {audit.status}
                   </span>
-
                 </div>
 
-                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                {/* METRIC CARDS */}
 
-                  {metricCards.map((metric) => {
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {metricCards.map(metric => {
                     const Icon = metric.icon;
 
                     return (
@@ -547,7 +623,6 @@ export default function Home () {
                         className="rounded-2xl border border-white/10 bg-[#111a2b] p-5"
                       >
                         <div className="flex items-center justify-between">
-
                           <p className="text-sm text-slate-400">
                             {metric.label}
                           </p>
@@ -556,57 +631,42 @@ export default function Home () {
                             size={20}
                             className={metric.color}
                           />
-
                         </div>
 
                         <p className="mt-4 text-3xl font-semibold">
                           {metric.value}
                         </p>
-
                       </div>
                     );
                   })}
-
                 </div>
 
                 {/* TABS */}
 
                 <div className="flex flex-wrap gap-2 border-b border-white/10 pb-3">
-
                   {[
                     { id: "overview", label: "Overview" },
                     { id: "issues", label: "SEO Issues" },
-                    { id: "links", label: "Broken Links" },
-                  ].map((tab) => (
-
+                    { id: "links", label: "Link Intelligence" },
+                  ].map(tab => (
                     <button
                       key={tab.id}
-                      onClick={() => {
-                        setActiveTab(tab.id as Tab);
-                        closeDetails();
-                        setSearch("");
-                        setFilter("all");
-                      }}
+                      onClick={() => changeTab(tab.id as Tab)}
                       className={`rounded-lg px-4 py-2 text-sm transition ${activeTab === tab.id
-                          ? "bg-cyan-400/10 text-cyan-300"
-                          : "text-slate-400 hover:bg-white/5"
+                        ? "bg-cyan-400/10 text-cyan-300"
+                        : "text-slate-400 hover:bg-white/5"
                         }`}
                     >
                       {tab.label}
                     </button>
-
                   ))}
-
                 </div>
 
                 {/* OVERVIEW */}
 
                 {activeTab === "overview" && (
-
                   <div className="grid gap-5 xl:grid-cols-2">
-
                     <div className="rounded-2xl border border-white/10 bg-[#111a2b] p-5">
-
                       <h3 className="font-semibold">
                         Issue distribution
                       </h3>
@@ -616,7 +676,6 @@ export default function Home () {
                       </p>
 
                       <div className="mt-6 space-y-5">
-
                         {[
                           {
                             label: "Errors",
@@ -633,8 +692,7 @@ export default function Home () {
                             count: metrics.notices,
                             color: "bg-blue-400",
                           },
-                        ].map((item) => {
-
+                        ].map(item => {
                           const percentage =
                             metrics.totalIssues > 0
                               ? (item.count / metrics.totalIssues) * 100
@@ -642,7 +700,6 @@ export default function Home () {
 
                           return (
                             <div key={item.label}>
-
                               <div className="mb-2 flex justify-between text-sm">
                                 <span className="text-slate-300">
                                   {item.label}
@@ -658,30 +715,82 @@ export default function Home () {
                                   style={{ width: `${percentage}%` }}
                                 />
                               </div>
-
                             </div>
                           );
                         })}
-
                       </div>
-
                     </div>
 
                     <div className="rounded-2xl border border-white/10 bg-[#111a2b] p-5">
+                      <h3 className="font-semibold">
+                        Link health
+                      </h3>
 
+                      <p className="mt-1 text-xs text-slate-500">
+                        Classification of discovered links
+                      </p>
+
+                      <div className="mt-5 space-y-3">
+                        {[
+                          {
+                            label: "Working",
+                            count: workingLinks.length,
+                            color: "text-emerald-300",
+                            icon: CheckCircle2,
+                          },
+                          {
+                            label: "Broken",
+                            count: brokenLinks.length,
+                            color: "text-red-300",
+                            icon: Link2,
+                          },
+                          {
+                            label: "Unverified",
+                            count: unverifiedLinks.length,
+                            color: "text-amber-300",
+                            icon: AlertTriangle,
+                          },
+                        ].map(item => {
+                          const Icon = item.icon;
+
+                          return (
+                            <div
+                              key={item.label}
+                              className="flex items-center justify-between rounded-xl border border-white/10 p-4"
+                            >
+                              <div className="flex items-center gap-3">
+                                <Icon size={18} className={item.color} />
+                                <span className="text-sm text-slate-300">
+                                  {item.label}
+                                </span>
+                              </div>
+
+                              <span className={`text-lg font-semibold ${item.color}`}>
+                                {item.count}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <button
+                        onClick={() => changeTab("links")}
+                        className="mt-4 flex w-full items-center justify-between rounded-xl bg-cyan-400/10 p-4 text-sm text-cyan-300 hover:bg-cyan-400/15"
+                      >
+                        Open Link Intelligence
+                        <ChevronRight size={17} />
+                      </button>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-[#111a2b] p-5 xl:col-span-2">
                       <h3 className="font-semibold">
                         Quick access
                       </h3>
 
-                      <p className="mt-1 text-xs text-slate-500">
-                        Explore the results of your latest audit
-                      </p>
-
-                      <div className="mt-5 space-y-3">
-
+                      <div className="mt-5 grid gap-3 md:grid-cols-2">
                         <button
-                          onClick={() => setActiveTab("issues")}
-                          className="flex w-full items-center justify-between rounded-xl border border-white/10 p-4 text-left hover:bg-white/5"
+                          onClick={() => changeTab("issues")}
+                          className="flex items-center justify-between rounded-xl border border-white/10 p-4 text-left hover:bg-white/5"
                         >
                           <div className="flex items-center gap-3">
                             <AlertCircle className="text-red-400" />
@@ -698,39 +807,32 @@ export default function Home () {
                         </button>
 
                         <button
-                          onClick={() => setActiveTab("links")}
-                          className="flex w-full items-center justify-between rounded-xl border border-white/10 p-4 text-left hover:bg-white/5"
+                          onClick={() => changeTab("links")}
+                          className="flex items-center justify-between rounded-xl border border-white/10 p-4 text-left hover:bg-white/5"
                         >
                           <div className="flex items-center gap-3">
                             <Link2 className="text-cyan-400" />
                             <div>
                               <p className="text-sm font-medium">
-                                Broken Links
+                                Link Intelligence
                               </p>
                               <p className="text-xs text-slate-500">
-                                {brokenLinks.length} detected records
+                                {allLinks.length} discovered links
                               </p>
                             </div>
                           </div>
                           <ChevronRight size={17} />
                         </button>
-
                       </div>
-
                     </div>
-
                   </div>
-
                 )}
 
                 {/* SEO ISSUES */}
 
                 {activeTab === "issues" && (
-
                   <div className="space-y-4">
-
                     <div className="flex flex-wrap items-center justify-between gap-3">
-
                       <div>
                         <h3 className="font-semibold">
                           Detected SEO issues
@@ -741,26 +843,21 @@ export default function Home () {
                       </div>
 
                       <div className="flex flex-wrap gap-2">
-
-                        {(["all", "error", "warning", "notice"] as Filter[]).map(
-                          (item) => (
-
-                            <button
-                              key={item}
-                              onClick={() => setFilter(item)}
-                              className={`rounded-lg border px-3 py-2 text-xs capitalize ${filter === item
-                                  ? "border-cyan-400/30 bg-cyan-400/10 text-cyan-300"
-                                  : "border-white/10 text-slate-400 hover:bg-white/5"
-                                }`}
-                            >
-                              {item === "all" ? "All issues" : item}
-                            </button>
-
-                          )
-                        )}
-
+                        {(
+                          ["all", "error", "warning", "notice"] as IssueFilter[]
+                        ).map(item => (
+                          <button
+                            key={item}
+                            onClick={() => setFilter(item)}
+                            className={`rounded-lg border px-3 py-2 text-xs capitalize ${filter === item
+                              ? "border-cyan-400/30 bg-cyan-400/10 text-cyan-300"
+                              : "border-white/10 text-slate-400 hover:bg-white/5"
+                              }`}
+                          >
+                            {item === "all" ? "All issues" : item}
+                          </button>
+                        ))}
                       </div>
-
                     </div>
 
                     <div className="relative">
@@ -771,18 +868,15 @@ export default function Home () {
 
                       <input
                         value={search}
-                        onChange={(event) => setSearch(event.target.value)}
+                        onChange={event => setSearch(event.target.value)}
                         placeholder="Search issue, rule ID or URL..."
                         className="w-full rounded-xl border border-white/10 bg-[#111a2b] py-3 pl-11 pr-4 text-sm outline-none focus:border-cyan-400"
                       />
                     </div>
 
                     <div className="overflow-x-auto rounded-2xl border border-white/10 bg-[#111a2b]">
-
                       <table className="w-full min-w-[750px] text-left text-sm">
-
                         <thead className="border-b border-white/10 bg-white/[0.02] text-xs uppercase text-slate-500">
-
                           <tr>
                             <th className="px-5 py-4">Issue</th>
                             <th className="px-5 py-4">Rule ID</th>
@@ -790,19 +884,18 @@ export default function Home () {
                             <th className="px-5 py-4">Affected page</th>
                             <th className="px-5 py-4">Details</th>
                           </tr>
-
                         </thead>
 
                         <tbody className="divide-y divide-white/5">
-
-                          {filteredIssues.map((issue) => (
-
+                          {filteredIssues.map(issue => (
                             <tr
                               key={issue.id}
-                              onClick={() => setSelectedIssue(issue)}
+                              onClick={() => {
+                                setSelectedIssue(issue);
+                                setSelectedLink(null);
+                              }}
                               className="cursor-pointer transition hover:bg-white/[0.04]"
                             >
-
                               <td className="max-w-[230px] px-5 py-4 font-medium text-slate-200">
                                 {issue.title}
                               </td>
@@ -824,13 +917,9 @@ export default function Home () {
                               <td className="px-5 py-4">
                                 <ChevronRight size={17} className="text-slate-500" />
                               </td>
-
                             </tr>
-
                           ))}
-
                         </tbody>
-
                       </table>
 
                       {filteredIssues.length === 0 && (
@@ -838,26 +927,47 @@ export default function Home () {
                           No matching SEO issue records were returned.
                         </div>
                       )}
-
                     </div>
-
                   </div>
-
                 )}
 
-                {/* BROKEN LINKS */}
+                {/* LINK INTELLIGENCE */}
 
                 {activeTab === "links" && (
-
                   <div className="space-y-4">
-
                     <div>
                       <h3 className="font-semibold">
-                        Broken links explorer
+                        Link intelligence explorer
                       </h3>
                       <p className="mt-1 text-xs text-slate-500">
-                        Inspect source pages and failed destinations
+                        Investigate working, broken and unverified destinations
                       </p>
+                    </div>
+
+                    {/* LINK CATEGORY FILTERS */}
+
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      {linkTabs.map(item => (
+                        <button
+                          key={item.id}
+                          onClick={() => {
+                            setLinkFilter(item.id);
+                            setSelectedLink(null);
+                            setSearch("");
+                          }}
+                          className={`rounded-xl border p-4 text-left transition ${linkFilter === item.id
+                            ? "border-cyan-400/30 bg-cyan-400/10"
+                            : "border-white/10 bg-[#111a2b] hover:bg-white/[0.04]"
+                            }`}
+                        >
+                          <p className="text-sm text-slate-400">
+                            {item.label}
+                          </p>
+                          <p className="mt-2 text-2xl font-semibold">
+                            {item.count}
+                          </p>
+                        </button>
+                      ))}
                     </div>
 
                     <div className="relative">
@@ -868,43 +978,40 @@ export default function Home () {
 
                       <input
                         value={search}
-                        onChange={(event) => setSearch(event.target.value)}
+                        onChange={event => setSearch(event.target.value)}
                         placeholder="Search source URL or destination..."
                         className="w-full rounded-xl border border-white/10 bg-[#111a2b] py-3 pl-11 pr-4 text-sm outline-none focus:border-cyan-400"
                       />
                     </div>
 
                     <div className="overflow-x-auto rounded-2xl border border-white/10 bg-[#111a2b]">
-
-                      <table className="w-full min-w-[750px] text-left text-sm">
-
+                      <table className="w-full min-w-[850px] text-left text-sm">
                         <thead className="border-b border-white/10 bg-white/[0.02] text-xs uppercase text-slate-500">
-
                           <tr>
                             <th className="px-5 py-4">Source page</th>
                             <th className="px-5 py-4">Destination</th>
                             <th className="px-5 py-4">Type</th>
                             <th className="px-5 py-4">HTTP status</th>
+                            <th className="px-5 py-4">Classification</th>
                             <th className="px-5 py-4">Details</th>
                           </tr>
-
                         </thead>
 
                         <tbody className="divide-y divide-white/5">
-
-                          {filteredLinks.map((link) => (
-
+                          {filteredLinks.map(link => (
                             <tr
                               key={link.id}
-                              onClick={() => setSelectedLink(link)}
+                              onClick={() => {
+                                setSelectedLink(link);
+                                setSelectedIssue(null);
+                              }}
                               className="cursor-pointer transition hover:bg-white/[0.04]"
                             >
-
-                              <td className="max-w-[200px] truncate px-5 py-4 text-xs text-slate-400">
+                              <td className="max-w-[180px] truncate px-5 py-4 text-xs text-slate-400">
                                 {link.sourceUrl || "Not provided"}
                               </td>
 
-                              <td className="max-w-[200px] truncate px-5 py-4 text-xs text-slate-200">
+                              <td className="max-w-[220px] truncate px-5 py-4 text-xs text-slate-200">
                                 {link.destinationUrl}
                               </td>
 
@@ -912,46 +1019,50 @@ export default function Home () {
                                 {link.linkType}
                               </td>
 
+                              <td className="px-5 py-4 text-xs text-slate-300">
+                                {link.statusCode ?? "No response"}
+                              </td>
+
                               <td className="px-5 py-4">
-                                <span className="rounded-lg bg-red-400/10 px-2.5 py-1 text-xs text-red-300">
-                                  {link.statusCode ?? "Unknown"}
+                                <span className={`rounded-lg px-2.5 py-1 text-xs capitalize ${linkStatusStyle(link.linkStatus)}`}>
+                                  {linkStatusLabel(link.linkStatus)}
                                 </span>
                               </td>
 
                               <td className="px-5 py-4">
                                 <ChevronRight size={17} className="text-slate-500" />
                               </td>
-
                             </tr>
-
                           ))}
-
                         </tbody>
-
                       </table>
 
                       {filteredLinks.length === 0 && (
-                        <div className="p-10 text-center text-sm text-slate-500">
-                          No broken link records were returned by the current audit.
+                        <div className="p-10 text-center">
+                          <CheckCircle2
+                            size={28}
+                            className="mx-auto text-slate-600"
+                          />
+
+                          <p className="mt-3 text-sm text-slate-400">
+                            {linkFilter === "broken"
+                              ? "No confirmed broken links found."
+                              : linkFilter === "unverified"
+                                ? "No unverified links found."
+                                : "No working links found in this audit."}
+                          </p>
                         </div>
                       )}
-
                     </div>
-
                   </div>
-
                 )}
 
-                {/* ISSUE DETAIL PANEL */}
+                {/* SELECTED RECORD DETAILS */}
 
                 {(selectedIssue || selectedLink) && (
-
                   <div className="rounded-2xl border border-cyan-400/20 bg-[#111a2b] p-5 md:p-7">
-
                     <div className="flex items-start justify-between gap-4">
-
                       <div className="flex items-center gap-3">
-
                         <div className="rounded-xl bg-cyan-400/10 p-3 text-cyan-300">
                           {selectedIssue
                             ? <AlertCircle size={20} />
@@ -962,13 +1073,18 @@ export default function Home () {
                           <p className="text-xs text-cyan-300">
                             SELECTED RECORD
                           </p>
+
                           <h3 className="mt-1 font-semibold">
                             {selectedIssue
                               ? selectedIssue.title
-                              : "Broken link details"}
+                              : selectedLink?.linkStatus === "broken"
+                                ? "Broken link details"
+                                : selectedLink?.linkStatus === "working" ||
+                                  selectedLink?.linkStatus === "redirected"
+                                  ? "Working link details"
+                                  : "Unverified link details"}
                           </h3>
                         </div>
-
                       </div>
 
                       <button
@@ -978,13 +1094,12 @@ export default function Home () {
                       >
                         <X size={19} />
                       </button>
-
                     </div>
 
+                    {/* SEO ISSUE DETAILS */}
+
                     {selectedIssue && (
-
                       <div className="mt-6 space-y-5">
-
                         <div className="flex flex-wrap gap-2">
                           <span className={`rounded-full border px-3 py-1 text-xs capitalize ${severityStyle(selectedIssue.severity)}`}>
                             {selectedIssue.severity}
@@ -1023,17 +1138,15 @@ export default function Home () {
                         </div>
 
                         <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 p-4 text-xs leading-5 text-amber-200">
-                          Fix functionality is not enabled yet. The current version provides inspection and recommendations only.
+                          Fix functionality is not enabled yet. This version provides inspection and recommendations only.
                         </div>
-
                       </div>
-
                     )}
 
+                    {/* LINK DETAILS */}
+
                     {selectedLink && (
-
                       <div className="mt-6 space-y-5">
-
                         <div>
                           <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                             Source page
@@ -1045,15 +1158,14 @@ export default function Home () {
 
                         <div>
                           <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                            Broken destination
+                            Destination
                           </p>
-                          <p className="mt-2 break-all text-sm text-red-300">
+                          <p className="mt-2 break-all text-sm text-slate-200">
                             {selectedLink.destinationUrl}
                           </p>
                         </div>
 
-                        <div className="grid gap-4 sm:grid-cols-2">
-
+                        <div className="grid gap-4 sm:grid-cols-3">
                           <div className="rounded-xl border border-white/10 p-4">
                             <p className="text-xs text-slate-500">
                               HTTP status
@@ -1072,11 +1184,32 @@ export default function Home () {
                             </p>
                           </div>
 
+                          <div className="rounded-xl border border-white/10 p-4">
+                            <p className="text-xs text-slate-500">
+                              Classification
+                            </p>
+                            <p className="mt-2 text-sm font-semibold capitalize">
+                              {linkStatusLabel(selectedLink.linkStatus)}
+                            </p>
+                          </div>
                         </div>
 
-                        <p className="text-sm text-slate-400">
-                          {selectedLink.message}
-                        </p>
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                            Verification details
+                          </p>
+                          <p className="mt-2 text-sm leading-6 text-slate-400">
+                            {selectedLink.message}
+                          </p>
+                        </div>
+
+                        {selectedLink.linkStatus === "unverified" ||
+                          selectedLink.linkStatus === "rate_limited" ||
+                          selectedLink.linkStatus === "server_error" ? (
+                          <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 p-4 text-sm leading-6 text-amber-200">
+                            CrawlMin could not conclusively verify this destination. This does not necessarily mean the link is broken.
+                          </div>
+                        ) : null}
 
                         <a
                           href={selectedLink.destinationUrl}
@@ -1087,24 +1220,20 @@ export default function Home () {
                           Inspect destination
                           <ExternalLink size={15} />
                         </a>
-
                       </div>
-
                     )}
-
                   </div>
-
                 )}
 
                 {/* RAW JSON */}
 
                 <div className="rounded-2xl border border-white/10 bg-[#111a2b]">
-
                   <button
                     onClick={() => setShowRawData(!showRawData)}
                     className="flex w-full items-center justify-between p-5 text-sm font-medium"
                   >
                     Raw audit response
+
                     <ChevronRight
                       size={18}
                       className={`transition-transform ${showRawData ? "rotate-90" : ""
@@ -1117,16 +1246,16 @@ export default function Home () {
                       {JSON.stringify(audit.results, null, 2)}
                     </pre>
                   )}
-
                 </div>
-
               </div>
             )}
 
             {!audit && !loading && (
               <div className="rounded-2xl border border-dashed border-white/10 p-12 text-center">
-
-                <Globe size={35} className="mx-auto text-slate-600" />
+                <Globe
+                  size={35}
+                  className="mx-auto text-slate-600"
+                />
 
                 <h3 className="mt-4 font-medium">
                   No audit results yet
@@ -1135,20 +1264,15 @@ export default function Home () {
                 <p className="mt-2 text-sm text-slate-500">
                   Enter a website URL above to start your first analysis.
                 </p>
-
               </div>
             )}
 
             <footer className="border-t border-white/10 pt-6 text-xs text-slate-600">
-              CrawlMin SEO AI · Development build · Version 0.2.0
+              CrawlMin SEO AI · Development build · Version 0.2.1
             </footer>
-
           </div>
-
         </section>
-
       </div>
-
     </main>
   );
 }
