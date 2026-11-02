@@ -47,3 +47,28 @@ export interface AuditResponse {
     target_url: string;
     results: Record<string, any>;
 }
+
+
+export type FixRisk = "low" | "medium" | "high";
+
+export type FixProposalStatus =
+    | "manual_review"
+    | "needs_review"
+    | "approved"
+    | "rejected"
+    | "applied";
+
+export interface FixProposal {
+    proposal_id: string;
+    page_url: string;
+    rule_id: string;
+    severity: string;
+    message: string;
+    recommendation: string;
+    original_value: unknown;
+    suggested_value: unknown;
+    risk: string;
+    reason: string;
+    status: FixProposalStatus;
+    auto_applicable: boolean;
+}

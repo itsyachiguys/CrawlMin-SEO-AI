@@ -1,5 +1,7 @@
 
 from collections import deque
+from copy import deepcopy
+import re
 from urllib.parse import urldefrag, urljoin, urlsplit, urlunsplit
 
 import httpx
@@ -15,6 +17,7 @@ TIMEOUT = 15.0
 
 def validate_url(url: str) -> str:
     """Validate that the target is an HTTP or HTTPS URL."""
+
     if not isinstance(url, str) or not url.strip():
         raise ValueError("URL must not be empty.")
 
@@ -42,6 +45,7 @@ def validate_url(url: str) -> str:
 
 def normalize_url(url: str) -> str:
     """Normalize URLs for duplicate detection."""
+
     url = urldefrag(url.strip())[0]
     parsed = urlsplit(url)
 
@@ -64,6 +68,7 @@ def normalize_url(url: str) -> str:
             (scheme == "http" and port == 80)
             or (scheme == "https" and port == 443)
         )
+
         netloc = hostname if default_port else f"{hostname}:{port}"
     else:
         netloc = hostname
@@ -79,8 +84,33 @@ def normalize_url(url: str) -> str:
     )
 
 
+def extract_content_text(soup: BeautifulSoup) -> str:
+    """Extract readable page content while excluding non-content elements."""
+
+    source = (
+        soup.find("main")
+        or soup.find("article")
+        or soup.body
+        or soup
+    )
+
+    content = deepcopy(source)
+
+    for element in content.select(
+        "script, style, noscript, nav, footer, header, "
+        "aside, form, svg, iframe"
+    ):
+        element.decompose()
+
+    text = content.get_text(" ", strip=True)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text[:5000]
+
+
 def crawl_page(url: str) -> dict:
     """Fetch one webpage and extract basic SEO information."""
+
     url = validate_url(url)
 
     with httpx.Client(
@@ -131,6 +161,8 @@ def crawl_page(url: str) -> dict:
         for level in range(1, 7)
     }
 
+    content_text = extract_content_text(soup)
+
     links = [
         {
             "text": link.get_text(" ", strip=True),
@@ -161,6 +193,7 @@ def crawl_page(url: str) -> dict:
         ),
         "canonical": canonical_tag.get("href") if canonical_tag else None,
         "headings": headings,
+        "content_text": content_text,
         "links": links,
         "images": images,
     }

@@ -33,6 +33,7 @@ import type {
   SEOIssue,
   BrokenLink,
   LinkStatus,
+  FixProposal,
 } from "@/types/audit";
 
 const API_URL =
@@ -45,7 +46,7 @@ type AuditResponse = {
   results: Record<string, any>;
 };
 
-type Tab = "overview" | "issues" | "links";
+type Tab = "overview" | "issues" | "links" | "fixes";
 
 type IssueFilter = "all" | "error" | "warning" | "notice";
 
@@ -57,7 +58,9 @@ export default function Home () {
   const [checkLinks, setCheckLinks] = useState(true);
   const [maxLinkChecks, setMaxLinkChecks] = useState(100);
   const [singlePage, setSinglePage] = useState(false);
-
+  const [proposalDecisions, setProposalDecisions] = useState<
+    Record<string, "approved" | "rejected">
+  >({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [audit, setAudit] = useState<AuditResponse | null>(null);
@@ -77,6 +80,44 @@ export default function Home () {
 
   const [showRawData, setShowRawData] = useState(false);
 
+  function approveProposal (proposal: FixProposal) {
+    if (
+      proposal.suggested_value === null ||
+      proposal.suggested_value === undefined
+    ) {
+      return;
+    }
+
+    setProposalDecisions(current => ({
+      ...current,
+      [proposal.proposal_id]: "approved",
+    }));
+  }
+
+  function rejectProposal (proposal: FixProposal) {
+    setProposalDecisions(current => ({
+      ...current,
+      [proposal.proposal_id]: "rejected",
+    }));
+  }
+
+  function approveAllEligible () {
+    setProposalDecisions(current => {
+      const updated = { ...current };
+
+      displayedFixProposals.forEach(proposal => {
+        if (
+          proposal.suggested_value !== null &&
+          proposal.suggested_value !== undefined &&
+          proposal.status === "manual_review"
+        ) {
+          updated[proposal.proposal_id] = "approved";
+        }
+      });
+
+      return updated;
+    });
+  }
   async function runAudit (event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -130,6 +171,31 @@ export default function Home () {
   }
 
   const results = audit?.results ?? {};
+  const fixProposals = useMemo<FixProposal[]>(() => {
+    const pages = Array.isArray(results.pages)
+      ? results.pages
+      : [];
+
+    return pages.flatMap((page: any) =>
+      Array.isArray(page.fix_proposals)
+        ? page.fix_proposals
+        : []
+    );
+  }, [results]);
+
+  const displayedFixProposals: FixProposal[] = fixProposals.map(
+    (proposal): FixProposal => ({
+      ...proposal,
+      status: proposalDecisions[proposal.proposal_id] ?? proposal.status,
+    })
+  );
+
+  const eligibleFixCount = displayedFixProposals.filter(
+    proposal =>
+      proposal.suggested_value !== null &&
+      proposal.suggested_value !== undefined &&
+      proposal.status === "manual_review"
+  ).length;
 
   const issues = useMemo(
     () => normalizeIssues(results),
@@ -386,7 +452,22 @@ export default function Home () {
               )}
             </button>
           </div>
+          <button
+            onClick={() => changeTab("fixes")}
+            className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-sm ${activeTab === "fixes"
+              ? "bg-cyan-400/10 text-cyan-300"
+              : "text-slate-400 hover:bg-white/5"
+              }`}
+          >
+            <Zap size={18} />
+            Fix Suggestions
 
+            {audit && (
+              <span className="ml-auto text-xs">
+                {fixProposals.length}
+              </span>
+            )}
+          </button>
           <div className="mt-auto rounded-xl border border-white/10 bg-white/[0.03] p-4">
             <div className="flex items-center gap-2 text-sm font-medium">
               <Zap size={16} className="text-cyan-300" />
@@ -418,7 +499,9 @@ export default function Home () {
                   ? "SEO Dashboard"
                   : activeTab === "issues"
                     ? "SEO Issues"
-                    : "Link Intelligence Explorer"}
+                    : activeTab === "links"
+                      ? "Link Intelligence Explorer"
+                      : "Fix Suggestions"}
               </h2>
             </div>
 
@@ -449,7 +532,9 @@ export default function Home () {
                   ? "Understand your website."
                   : activeTab === "issues"
                     ? "Find what needs fixing."
-                    : "Understand every destination."}
+                    : activeTab === "links"
+                      ? "Understand every destination."
+                      : "Turn SEO findings into corrections."}
               </h1>
 
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">
@@ -457,7 +542,9 @@ export default function Home () {
                   ? "Analyze your website, identify technical SEO problems and understand its overall health."
                   : activeTab === "issues"
                     ? "Inspect detected SEO issues, their severity, affected pages and recommended corrections."
-                    : "Investigate broken, unverified and working links across your website."}
+                    : activeTab === "links"
+                      ? "Investigate broken, unverified and working links across your website."
+                      : "Review proposed SEO corrections, compare original and suggested values, and manage approval decisions."}
               </p>
             </div>
 
@@ -648,6 +735,7 @@ export default function Home () {
                     { id: "overview", label: "Overview" },
                     { id: "issues", label: "SEO Issues" },
                     { id: "links", label: "Link Intelligence" },
+                    { id: "fixes", label: "Fix Suggestions" },
                   ].map(tab => (
                     <button
                       key={tab.id}
@@ -930,6 +1018,216 @@ export default function Home () {
                     </div>
                   </div>
                 )}
+
+
+                {/* FIX SUGGESTIONS */}
+
+                {activeTab === "fixes" && (
+                  <div className="space-y-5">
+
+                    <div className="flex flex-wrap items-center justify-between gap-4">
+                      <div>
+                        <h3 className="font-semibold">
+                          SEO Fix Suggestions
+                        </h3>
+                        <p className="mt-1 text-xs text-slate-500">
+                          Review proposed corrections before approving them.
+                        </p>
+                      </div>
+
+                      <button
+                        onClick={approveAllEligible}
+                        disabled={eligibleFixCount === 0}
+                        className="rounded-xl bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Approve all eligible ({eligibleFixCount})
+                      </button>
+                    </div>
+
+                    <div className="grid gap-4 sm:grid-cols-3">
+                      {[
+                        {
+                          label: "Total proposals",
+                          value: displayedFixProposals.length,
+                        },
+                        {
+                          label: "Needs review",
+                          value: displayedFixProposals.filter(
+                            p => p.status === "needs_review"
+                          ).length,
+                        },
+                        {
+                          label: "Manual review",
+                          value: displayedFixProposals.filter(
+                            p => p.status === "manual_review"
+                          ).length,
+                        },
+                      ].map(item => (
+                        <div
+                          key={item.label}
+                          className="rounded-xl border border-white/10 bg-[#111a2b] p-4"
+                        >
+                          <p className="text-xs text-slate-500">
+                            {item.label}
+                          </p>
+                          <p className="mt-2 text-2xl font-semibold">
+                            {item.value}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+
+                    {displayedFixProposals.length === 0 ? (
+                      <div className="rounded-2xl border border-dashed border-white/10 p-10 text-center">
+                        <CheckCircle2
+                          size={30}
+                          className="mx-auto text-slate-500"
+                        />
+                        <p className="mt-3 text-sm text-slate-400">
+                          No fix proposals are available for this audit.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        {displayedFixProposals.map(proposal => {
+                          const hasSuggestion =
+                            proposal.suggested_value !== null &&
+                            proposal.suggested_value !== undefined;
+
+                          const statusStyle =
+                            proposal.status === "approved"
+                              ? "bg-emerald-400/10 text-emerald-300"
+                              : proposal.status === "rejected"
+                                ? "bg-red-400/10 text-red-300"
+                                : proposal.status === "manual_review"
+                                  ? "bg-amber-400/10 text-amber-300"
+                                  : "bg-cyan-400/10 text-cyan-300";
+
+                          return (
+                            <div
+                              key={proposal.proposal_id}
+                              className="rounded-2xl border border-white/10 bg-[#111a2b] p-5"
+                            >
+                              <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div>
+                                  <h4 className="font-semibold text-slate-100">
+                                    {proposal.rule_id.replace(/_/g, " ")}
+                                  </h4>
+                                  <p className="mt-1 break-all text-xs text-slate-500">
+                                    {proposal.page_url}
+                                  </p>
+                                </div>
+
+                                <div className="flex flex-wrap gap-2">
+                                  <span className="rounded-lg bg-white/5 px-3 py-1 text-xs capitalize text-slate-300">
+                                    {proposal.risk} risk
+                                  </span>
+
+                                  <span className={`rounded-lg px-3 py-1 text-xs ${statusStyle}`}>
+                                    {proposal.status.replace(/_/g, " ")}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <p className="mt-4 text-sm leading-6 text-slate-400">
+                                {proposal.message}
+                              </p>
+
+                              <div className="mt-5 grid gap-4 md:grid-cols-2">
+
+                                <div className="rounded-xl border border-white/10 bg-[#090f1d] p-4">
+                                  <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                                    Original value
+                                  </p>
+
+                                  <pre className="mt-3 whitespace-pre-wrap break-words text-sm text-slate-300">
+                                    {proposal.original_value === null ||
+                                      proposal.original_value === undefined
+                                      ? "Not available"
+                                      : typeof proposal.original_value === "string"
+                                        ? proposal.original_value
+                                        : JSON.stringify(proposal.original_value, null, 2)}
+                                  </pre>
+                                </div>
+
+                                <div className="rounded-xl border border-cyan-400/20 bg-cyan-400/[0.03] p-4">
+                                  <p className="text-xs font-semibold uppercase tracking-wider text-cyan-300">
+                                    Suggested value
+                                  </p>
+
+                                  <pre className="mt-3 whitespace-pre-wrap break-words text-sm text-slate-300">
+                                    {hasSuggestion
+                                      ? typeof proposal.suggested_value === "string"
+                                        ? proposal.suggested_value
+                                        : JSON.stringify(proposal.suggested_value, null, 2)
+                                      : "A suggested value has not been generated yet."}
+                                  </pre>
+                                </div>
+
+                              </div>
+
+                              <div className="mt-4 rounded-xl border border-white/10 p-4">
+                                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                                  Review notes
+                                </p>
+
+                                <p className="mt-2 text-sm leading-6 text-slate-400">
+                                  {proposal.reason}
+                                </p>
+
+                                <p className="mt-2 text-xs text-slate-500">
+                                  Recommendation: {proposal.recommendation}
+                                </p>
+                              </div>
+
+                              <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+                                <p className="text-xs text-slate-500">
+                                  {hasSuggestion
+                                    ? "Review the suggested value before approving."
+                                    : "This proposal requires manual review."}
+                                </p>
+
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={() => rejectProposal(proposal)}
+                                    disabled={
+                                      proposal.status === "rejected" ||
+                                      proposal.status === "approved"
+                                    }
+                                    className="rounded-lg border border-white/10 px-4 py-2 text-xs text-slate-300 hover:bg-white/5 disabled:opacity-40"
+                                  >
+                                    Reject
+                                  </button>
+
+                                  <button
+                                    onClick={() => approveProposal(proposal)}
+                                    disabled={
+                                      !hasSuggestion ||
+                                      proposal.status === "approved" ||
+                                      proposal.status === "rejected"
+                                    }
+                                    className="rounded-lg bg-cyan-400 px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-40"
+                                  >
+                                    Approve
+                                  </button>
+                                </div>
+                              </div>
+
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 p-4 text-sm leading-6 text-amber-200">
+                      Approval currently records a review decision in this browser
+                      session only. It does not modify website files or publish
+                      changes to a website.
+                    </div>
+
+                  </div>
+                )}
+
 
                 {/* LINK INTELLIGENCE */}
 
